@@ -1,72 +1,38 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
+#include <vector>
+#include <string>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
-#include <vector>
-#include <sddl.h>
 
-#pragma comment(lib, "ws2_32.lib")
-
-// ------------------------
-// НАСТРОЙКИ
-// ------------------------
 const wchar_t* INTERFACE_NAME = L"Беспроводная сеть";
-const char* CHECK_IP = "8.8.8.8";
-const int CHECK_PORT = 53;
-const int CHECK_TIMEOUT = 3000;
-const int RETRY_BEFORE_RESTART = 2;
-const int SLEEP_INTERVAL = 5;
 
-// ------------------------
-// ЦВЕТА
-// ------------------------
+const char* CHECK_IP          = "8.8.8.8";
+const int   CHECK_PORT        = 53;
+const int   CHECK_TIMEOUT     = 3000;
+const int   RETRY_BEFORE_RESTART = 2;
+const int   SLEEP_INTERVAL    = 5;
+const int   POST_RESTART_WAIT = 10;
+
 enum Color {
-    GREEN = 10,
-    RED = 12,
+    GREEN  = 10,
+    RED    = 12,
     YELLOW = 14,
-    WHITE = 15
+    WHITE  = 15
 };
 
 void setColor(Color color) {
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), color);
 }
 
-// ------------------------
-// ПРОВЕРКА АДМИНА
-// ------------------------
-bool isRunAsAdmin() {
-    BOOL isAdmin = FALSE;
-    PSID adminGroup = NULL;
-
-    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
-
-    if (AllocateAndInitializeSid(
-        &ntAuthority,
-        2,
-        SECURITY_BUILTIN_DOMAIN_RID,
-        DOMAIN_ALIAS_RID_ADMINS,
-        0, 0, 0, 0, 0, 0,
-        &adminGroup)) {
-
-        CheckTokenMembership(NULL, adminGroup, &isAdmin);
-        FreeSid(adminGroup);
-    }
-
-    return isAdmin;
-}
-
-// ------------------------
-// ВРЕМЯ
-// ------------------------
-std::wstring getTime() {
+std::wstring getCurrentTime() {
     auto now = std::chrono::system_clock::now();
     std::time_t t = std::chrono::system_clock::to_time_t(now);
-
-    std::tm localTime;
+    std::tm localTime{};
     localtime_s(&localTime, &t);
 
     wchar_t buffer[9];
@@ -74,64 +40,66 @@ std::wstring getTime() {
     return buffer;
 }
 
-// ------------------------
-// ОЧИСТКА СТРОКИ
-// ------------------------
-void clearLine() {
-    std::wcout << L"\r" << std::wstring(100, L' ') << L"\r";
-}
+class WiFiManager {
+private:
+    std::wstring interfaceName;
 
-// ------------------------
-// ЗАПУСК КОМАНДЫ
-// ------------------------
-bool runCommand(const std::wstring& command) {
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-
-    std::wstring cmd = L"cmd.exe /C " + command;
-
-    std::vector<wchar_t> cmdLine(cmd.begin(), cmd.end());
-    cmdLine.push_back(L'\0');
-
-    BOOL result = CreateProcessW(
-        NULL,
-        cmdLine.data(),
-        NULL,
-        NULL,
-        FALSE,
-        CREATE_NO_WINDOW,
-        NULL,
-        NULL,
-        &si,
-        &pi
-    );
-
-    if (!result) {
-        setColor(RED);
-        std::wcout << L"❌ Ошибка CreateProcess: " << GetLastError() << L"\n";
+public:
+    WiFiManager() : interfaceName(INTERFACE_NAME) {
         setColor(WHITE);
-        return false;
+        std::wcout << L"✅ Используется интерфейс: " << interfaceName << L"\n\n";
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    void restartWiFi() {
+        setColor(RED);
+        std::wcout << L"\n[" << getCurrentTime() << L"] 🔄 Перезапуск Wi-Fi...\n";
 
-    DWORD exitCode;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
+        std::wstring disableCmd = L"netsh interface set interface \"" + interfaceName + L"\" disable";
+        std::wstring enableCmd  = L"netsh interface set interface \"" + interfaceName + L"\" enable";
 
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+        runCommand(disableCmd);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        bool success = runCommand(enableCmd);
 
-    return exitCode == 0;
-}
+        if (success) {
+            setColor(GREEN);
+            std::wcout << L"[" << getCurrentTime() << L"] ✅ Wi-Fi перезапущен. Ожидание восстановления...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(POST_RESTART_WAIT));
+        } else {
+            setColor(RED);
+            std::wcout << L"[" << getCurrentTime() << L"] ❌ Ошибка при перезапуске Wi-Fi\n";
+        }
+        setColor(WHITE);
+    }
 
-// ------------------------
-// ПРОВЕРКА ИНТЕРНЕТА
-// ------------------------
+private:
+    bool runCommand(const std::wstring& command) {
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi{};
+
+        std::wstring fullCmd = L"cmd.exe /C " + command;
+        std::vector<wchar_t> cmdLine(fullCmd.begin(), fullCmd.end());
+        cmdLine.push_back(L'\0');
+
+        if (!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            return false;
+        }
+
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD exitCode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+
+        return exitCode == 0;
+    }
+};
+
 bool hasInternet() {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        return false;
-    }
+    if (sock == INVALID_SOCKET) return false;
 
     sockaddr_in server{};
     server.sin_family = AF_INET;
@@ -147,88 +115,69 @@ bool hasInternet() {
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
     int result = connect(sock, (sockaddr*)&server, sizeof(server));
-
     closesocket(sock);
     return result == 0;
 }
 
-// ------------------------
-// ПЕРЕЗАПУСК WIFI
-// ------------------------
-void restartWiFi() {
-    setColor(RED);
-    std::wcout << L"\n[" << getTime() << L"] 🔄 Перезапуск Wi-Fi...\n";
-
-    std::wstring disableCmd = L"netsh interface set interface \"" + std::wstring(INTERFACE_NAME) + L"\" disable";
-    std::wstring enableCmd  = L"netsh interface set interface \"" + std::wstring(INTERFACE_NAME) + L"\" enable";
-
-    bool res1 = runCommand(disableCmd);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    bool res2 = runCommand(enableCmd);
-
-    if (res1 && res2) {
-        setColor(GREEN);
-        std::wcout << L"[" << getTime() << L"] ✅ Wi-Fi восстановлен\n";
-    } else {
-        setColor(RED);
-        std::wcout << L"[" << getTime() << L"] ❌ Ошибка перезапуска Wi-Fi\n";
-    }
-
-    setColor(WHITE);
-}
-
-// ------------------------
-// MAIN
-// ------------------------
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT);
 
-    // 🔐 Проверка администратора
-    if (!isRunAsAdmin()) {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = nullptr;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(nullptr, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+
+    if (!isAdmin) {
         setColor(RED);
         std::wcout << L"❌ Программа должна быть запущена от имени администратора!\n";
         setColor(WHITE);
-
         std::wcout << L"Нажмите Enter для выхода...\n";
         std::cin.get();
         return 1;
     }
 
-    // Winsock init
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::wcout << L"❌ Ошибка WSAStartup\n";
         return 1;
     }
 
-    int fail_count = 0;
+    WiFiManager wifiManager;
 
     std::wcout << L"==============================\n";
-    std::wcout << L"      WiFi Monitor v1.0       \n";
+    std::wcout << L"      WiFi Monitor v1.1       \n";
     std::wcout << L"==============================\n\n";
 
-    while (true) {
-        clearLine();
+    int failCount = 0;
 
-        std::wstring time = getTime();
+    while (true) {
+        std::wstring timeStr = getCurrentTime();
 
         if (hasInternet()) {
             setColor(GREEN);
-            std::wcout << L"[" << time << L"] 🌐 ONLINE  | Интернет работает стабильно   ";
-            fail_count = 0;
+            std::wcout << L"\r[" << timeStr << L"] 🌐 ONLINE  | Интернет работает стабильно          ";
+            failCount = 0;
         } else {
-            fail_count++;
-
+            failCount++;
             setColor(YELLOW);
-            std::wcout << L"[" << time << L"] ⚠️ OFFLINE | Попытка: " << fail_count << L"   ";
+            std::wcout << L"\r[" << timeStr << L"] ⚠️ OFFLINE | Попытка: " << failCount << L"                    ";
 
-            if (fail_count >= RETRY_BEFORE_RESTART) {
-                restartWiFi();
-                fail_count = 0;
+            if (failCount >= RETRY_BEFORE_RESTART) {
+                wifiManager.restartWiFi();
+                failCount = 0;
 
                 std::this_thread::sleep_for(std::chrono::seconds(5));
+                if (hasInternet()) {
+                    setColor(GREEN);
+                    std::wcout << L"[" << getCurrentTime() << L"] ✅ Интернет восстановлен после перезапуска\n";
+                }
             }
         }
 
